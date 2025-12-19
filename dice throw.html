@@ -1,0 +1,456 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
+    <title>Liquid Dice 21:9 Ultimate</title>
+    <style>
+        body { margin: 0; overflow: hidden; background-color: #000; font-family: sans-serif; touch-action: none; /* 禁止浏览器默认缩放 */ }
+        
+        #canvas-container { width: 100vw; height: 100vh; display: block; }
+
+        /* UI 层 */
+        #ui-layer {
+            position: absolute; bottom: 30px; left: 0; width: 100%;
+            text-align: center; pointer-events: none;
+            color: rgba(255,255,255,0.5); font-size: 13px; letter-spacing: 1px;
+            text-shadow: 0 2px 4px rgba(0,0,0,0.8);
+            z-index: 10;
+        }
+        b { color: white; }
+
+        /* --- 液态重置按钮 --- */
+        #reset-btn {
+            position: absolute; top: 20px; right: 20px;
+            width: 50px; height: 50px;
+            border-radius: 16px;
+            cursor: pointer;
+            z-index: 20;
+            pointer-events: auto;
+            
+            /* 液态玻璃质感 CSS 模拟 */
+            background: rgba(255, 255, 255, 0.1);
+            backdrop-filter: blur(15px);
+            -webkit-backdrop-filter: blur(15px);
+            border: 1px solid rgba(255, 255, 255, 0.25);
+            border-bottom: 1px solid rgba(255, 255, 255, 0.1);
+            border-right: 1px solid rgba(255, 255, 255, 0.1);
+            
+            box-shadow: 
+                0 10px 30px rgba(0, 0, 0, 0.3),
+                inset 0 0 0 1px rgba(255, 255, 255, 0.1),
+                inset 0 0 10px rgba(255, 255, 255, 0.1);
+            
+            display: flex; align-items: center; justify-content: center;
+            color: white; font-size: 20px;
+            transition: all 0.2s cubic-bezier(0.175, 0.885, 0.32, 1.275);
+        }
+
+        /* 内部图标 */
+        #reset-btn svg { fill: white; opacity: 0.8; width: 24px; height: 24px; filter: drop-shadow(0 2px 3px rgba(0,0,0,0.3)); }
+
+        /* 悬停高光 */
+        #reset-btn:hover {
+            background: rgba(255, 255, 255, 0.15);
+            box-shadow: 0 0 15px rgba(255, 255, 255, 0.3), inset 0 0 20px rgba(255, 255, 255, 0.2);
+            transform: translateY(-2px);
+        }
+
+        /* 点击动画：变小 + 高光爆发 */
+        #reset-btn:active {
+            transform: scale(0.9);
+            background: rgba(255, 255, 255, 0.3);
+            box-shadow: 0 0 5px rgba(255, 255, 255, 0.5), inset 0 0 30px rgba(255, 255, 255, 0.4);
+            border-color: rgba(255, 255, 255, 0.6);
+        }
+    </style>
+</head>
+<body>
+
+    <div id="reset-btn" onclick="resetDice()">
+        <svg viewBox="0 0 24 24"><path d="M17.65 6.35C16.2 4.9 14.21 4 12 4c-4.42 0-7.99 3.58-7.99 8s3.57 8 7.99 8c3.73 0 6.84-2.55 7.73-6h-2.08c-.82 2.33-3.04 4-5.65 4-3.31 0-6-2.69-6-6s2.69-6 6-6c1.66 0 3.14.69 4.22 1.78L13 11h7V4l-2.35 2.35z"/></svg>
+    </div>
+
+    <div id="ui-layer">
+        <div><b>Liquid Glass 21:9</b></div>
+        <span style="font-size:11px; opacity:0.7;">
+            🖱️ Scroll to Lift &bull; 👆 Drag to Throw
+        </span>
+    </div>
+
+    <div id="canvas-container"></div>
+
+    <script type="importmap">
+        {
+            "imports": {
+                "three": "https://unpkg.com/three@0.160.0/build/three.module.js",
+                "three/addons/": "https://unpkg.com/three@0.160.0/examples/jsm/",
+                "cannon-es": "https://unpkg.com/cannon-es@0.20.0/dist/cannon-es.js"
+            }
+        }
+    </script>
+
+    <script type="module">
+        import * as THREE from 'three';
+        import { RoundedBoxGeometry } from 'three/addons/geometries/RoundedBoxGeometry.js';
+        import * as CANNON from 'cannon-es';
+
+        // ==========================================
+        // 1. 初始化场景 (Scene Setup)
+        // ==========================================
+        const container = document.getElementById('canvas-container');
+        const scene = new THREE.Scene();
+        
+        // 相机位置：拉远一点以适应不同长宽比
+        const cameraDistance = 18;
+        const camera = new THREE.PerspectiveCamera(40, window.innerWidth / window.innerHeight, 0.1, 100);
+        camera.position.set(0, 14, cameraDistance); 
+        camera.lookAt(0, 0, 0);
+
+        const renderer = new THREE.WebGLRenderer({ antialias: true, alpha: false });
+        renderer.setSize(window.innerWidth, window.innerHeight);
+        renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+        renderer.shadowMap.enabled = true;
+        renderer.shadowMap.type = THREE.SoftShadowMap;
+        renderer.toneMapping = THREE.ACESFilmicToneMapping;
+        container.appendChild(renderer.domElement);
+
+        // 背景
+        const texLoader = new THREE.TextureLoader();
+        const bgTexture = texLoader.load('https://images.unsplash.com/photo-1550684848-fac1c5b4e853?q=80&w=2070&auto=format&fit=crop');
+        scene.background = bgTexture;
+        scene.environment = bgTexture;
+
+        // ==========================================
+        // 2. 物理世界 (Physics World)
+        // ==========================================
+        const world = new CANNON.World();
+        world.gravity.set(0, -30, 0);
+        world.broadphase = new CANNON.SAPBroadphase(world);
+        world.allowSleep = true;
+
+        const defaultMat = new CANNON.Material('default');
+        const defaultContact = new CANNON.ContactMaterial(defaultMat, defaultMat, {
+            friction: 0.3, restitution: 0.5
+        });
+        world.addContactMaterial(defaultContact);
+
+        // 地面
+        const groundBody = new CANNON.Body({ mass: 0, shape: new CANNON.Plane(), material: defaultMat });
+        groundBody.quaternion.setFromEuler(-Math.PI / 2, 0, 0);
+        world.addBody(groundBody);
+
+        // 阴影平面 (Visual Only)
+        const shadowPlane = new THREE.Mesh(new THREE.PlaneGeometry(100, 100), new THREE.ShadowMaterial({ opacity: 0.4 }));
+        shadowPlane.rotation.x = -Math.PI / 2;
+        shadowPlane.position.y = 0.02;
+        shadowPlane.receiveShadow = true;
+        scene.add(shadowPlane);
+
+        // --- 动态边界墙 (Smart Boundaries) ---
+        // 21:9 优化核心：根据摄像机视锥计算墙壁位置
+        const walls = [];
+        const wallShape = new CANNON.Box(new CANNON.Vec3(1, 20, 20)); // 厚度1的墙
+
+        function updateWalls() {
+            // 移除旧墙
+            walls.forEach(w => world.removeBody(w));
+            walls.length = 0;
+
+            // 计算视锥体在地面(y=0)的宽度和高度
+            // vFOV 是垂直视角，aspect 是宽高比
+            const vFOV = THREE.MathUtils.degToRad(camera.fov);
+            // 计算摄像机到地面的垂直距离
+            const height = camera.position.y;
+            // 可视高度的一半
+            const visibleHeight = 2 * Math.tan(vFOV / 2) * Math.abs(camera.position.z / Math.cos(Math.atan(camera.position.y / camera.position.z))); 
+            // 简单估算：基于z distance的视野范围
+            // 更精确的做法：raycast corners
+            
+            // 简化算法：根据屏幕比例动态设置墙距
+            // 基础距离 10，随宽高比调整
+            const aspect = window.innerWidth / window.innerHeight;
+            let limitX = 8 * aspect; // 宽度随屏幕变宽
+            let limitZ = 12; // 深度相对固定
+
+            // 针对超宽屏/超长屏的限制
+            if (aspect < 0.6) { // 竖屏手机 9:16 或 9:21
+                limitX = 6; 
+                limitZ = 14;
+            } else if (aspect > 2) { // 21:9 横屏
+                limitX = 14;
+            }
+
+            const createWall = (x, z, rotY) => {
+                const b = new CANNON.Body({ mass: 0, shape: wallShape, material: defaultMat });
+                b.position.set(x, 10, z); // 高度抬高确保覆盖
+                b.quaternion.setFromEuler(0, rotY, 0);
+                world.addBody(b);
+                walls.push(b);
+            };
+
+            // 创建四面墙 (稍微留点余量防止穿模)
+            createWall(limitX + 2, 0, 0);      // 右
+            createWall(-(limitX + 2), 0, 0);   // 左
+            createWall(0, -(limitZ + 2), Math.PI/2); // 上
+            createWall(0, limitZ + 2, Math.PI/2);    // 下
+        }
+        
+        // 初始化墙壁
+        updateWalls();
+
+        // ==========================================
+        // 3. 骰子纹理生成 (Texture Gen)
+        // ==========================================
+        function createDiceTexture(number) {
+            const canvas = document.createElement('canvas');
+            canvas.width = 256; canvas.height = 256;
+            const ctx = canvas.getContext('2d');
+            ctx.clearRect(0, 0, 256, 256);
+            ctx.fillStyle = '#000000';
+            const r = 32; 
+            const drawDot = (x, y) => { ctx.beginPath(); ctx.arc(x, y, r, 0, Math.PI * 2); ctx.fill(); };
+            const c = 128, g = 68;
+            
+            if (number===1) drawDot(c,c);
+            if (number===2) { drawDot(c-g,c-g); drawDot(c+g,c+g); }
+            if (number===3) { drawDot(c-g,c-g); drawDot(c,c); drawDot(c+g,c+g); }
+            if (number===4) { drawDot(c-g,c-g); drawDot(c+g,c-g); drawDot(c-g,c+g); drawDot(c+g,c+g); }
+            if (number===5) { drawDot(c-g,c-g); drawDot(c+g,c-g); drawDot(c,c); drawDot(c-g,c+g); drawDot(c+g,c+g); }
+            if (number===6) { drawDot(c-g,c-g); drawDot(c+g,c-g); drawDot(c-g,c); drawDot(c+g,c); drawDot(c-g,c+g); drawDot(c+g,c+g); }
+            return new THREE.CanvasTexture(canvas);
+        }
+        const textures = [null, createDiceTexture(1), createDiceTexture(2), createDiceTexture(3), createDiceTexture(4), createDiceTexture(5), createDiceTexture(6)];
+
+        // ==========================================
+        // 4. 骰子构建 (Core + Skin)
+        // ==========================================
+        const diceSize = 2.5;
+        const diceMesh = new THREE.Group();
+
+        // Core: 纯净液态玻璃 (保持不变!)
+        const glassGeo = new RoundedBoxGeometry(diceSize, diceSize, diceSize, 10, 0.5);
+        const glassMat = new THREE.MeshPhysicalMaterial({
+            color: 0xffffff,
+            metalness: 0.0, roughness: 0.0,
+            transmission: 1.0, thickness: 3.5, ior: 1.5,
+            clearcoat: 1.0, clearcoatRoughness: 0.05,
+            side: THREE.DoubleSide
+        });
+        const coreMesh = new THREE.Mesh(glassGeo, glassMat);
+        coreMesh.castShadow = true;
+        diceMesh.add(coreMesh);
+
+        // Skin: 单向透视表皮 (保持不变!)
+        const skinGeo = new RoundedBoxGeometry(diceSize + 0.005, diceSize + 0.005, diceSize + 0.005, 10, 0.5);
+        const skinMaterials = [
+            new THREE.MeshBasicMaterial({ map: textures[1], transparent: true, side: THREE.FrontSide }),
+            new THREE.MeshBasicMaterial({ map: textures[6], transparent: true, side: THREE.FrontSide }),
+            new THREE.MeshBasicMaterial({ map: textures[2], transparent: true, side: THREE.FrontSide }),
+            new THREE.MeshBasicMaterial({ map: textures[5], transparent: true, side: THREE.FrontSide }),
+            new THREE.MeshBasicMaterial({ map: textures[3], transparent: true, side: THREE.FrontSide }),
+            new THREE.MeshBasicMaterial({ map: textures[4], transparent: true, side: THREE.FrontSide }),
+        ];
+        const skinMesh = new THREE.Mesh(skinGeo, skinMaterials);
+        diceMesh.add(skinMesh);
+
+        scene.add(diceMesh);
+
+        // 物理刚体
+        const diceShape = new CANNON.Box(new CANNON.Vec3(diceSize/2, diceSize/2, diceSize/2));
+        const diceBody = new CANNON.Body({ mass: 10, shape: diceShape, material: defaultMat });
+        diceBody.position.set(0, 5, 0);
+        diceBody.angularVelocity.set(1, 1, 0);
+        world.addBody(diceBody);
+
+        // 灯光
+        const ambientLight = new THREE.AmbientLight(0xffffff, 0.5);
+        scene.add(ambientLight);
+        const spotLight = new THREE.SpotLight(0xffffff, 2.0);
+        spotLight.position.set(10, 25, 10);
+        spotLight.angle = Math.PI/6; spotLight.penumbra = 0.5;
+        spotLight.castShadow = true;
+        spotLight.shadow.mapSize.set(2048, 2048);
+        scene.add(spotLight);
+        const rimLight = new THREE.PointLight(0x00ffff, 3, 20);
+        rimLight.position.set(-8, 5, -8);
+        scene.add(rimLight);
+
+        // ==========================================
+        // 5. 交互逻辑 (Interaction)
+        // ==========================================
+        const raycaster = new THREE.Raycaster();
+        const mouse = new THREE.Vector2();
+        const dragPlane = new THREE.Plane(new THREE.Vector3(0, 1, 0), 0);
+        
+        // 虚拟抓手
+        const mouseBody = new CANNON.Body({ mass: 0, type: CANNON.Body.KINEMATIC });
+        mouseBody.collisionFilterGroup = 0;
+        world.addBody(mouseBody);
+        
+        let constraint = null;
+        let isHolding = false;
+        let targetHeight = 3.0; // 初始悬浮高度
+
+        // 全局暴露 reset 函数给按钮调用
+        window.resetDice = function() {
+            // 移除约束
+            if (constraint) {
+                world.removeConstraint(constraint);
+                constraint = null;
+                isHolding = false;
+                document.body.style.cursor = 'default';
+            }
+
+            // 重置物理状态
+            diceBody.position.set(0, 6, 0);
+            diceBody.velocity.set(0, 0, 0);
+            diceBody.angularVelocity.set(Math.random()*5, Math.random()*5, Math.random()*5); // 给点随机旋转
+            diceBody.quaternion.set(0,0,0,1);
+            diceBody.wakeUp();
+
+            // 重置UI高度
+            targetHeight = 3.0;
+        };
+
+        function getRayPoint(clientX, clientY) {
+            mouse.x = (clientX / window.innerWidth) * 2 - 1;
+            mouse.y = -(clientY / window.innerHeight) * 2 + 1;
+            raycaster.setFromCamera(mouse, camera);
+            const target = new THREE.Vector3();
+            // 在当前 targetHeight 平面查找交点
+            dragPlane.constant = -targetHeight; 
+            raycaster.ray.intersectPlane(dragPlane, target);
+            return target;
+        }
+
+        function grabDice(point) {
+            isHolding = true;
+            document.body.style.cursor = 'grabbing';
+            diceBody.wakeUp();
+            mouseBody.position.set(point.x, point.y, point.z);
+            constraint = new CANNON.PointToPointConstraint(diceBody, new CANNON.Vec3(0,0,0), mouseBody, new CANNON.Vec3(0,0,0));
+            world.addConstraint(constraint);
+        }
+
+        // --- 滚轮修复 (Scroll Fix) ---
+        window.addEventListener('wheel', (e) => {
+            e.preventDefault(); // 防止页面滚动
+            
+            // 增加灵敏度 (0.01 -> 0.005, 或者根据deltaMode判断)
+            const delta = e.deltaY * 0.005; 
+            targetHeight += delta;
+            targetHeight = Math.max(1.5, Math.min(targetHeight, 12)); // 限制范围
+
+            // 无论是否抓取，都更新mouseBody的高度，这样下次点击或者当前抓取都会即时响应
+            if (isHolding) {
+                // 如果正在抓取，只更新Y轴
+                mouseBody.position.y = targetHeight;
+                diceBody.wakeUp();
+            }
+        }, { passive: false }); // 关键：passive: false 允许 preventDefault
+
+        // --- 鼠标事件 ---
+        window.addEventListener('mousedown', (e) => {
+            if(e.target.closest('#reset-btn')) return; // 防止点击按钮触发投掷
+            mouse.x = (e.clientX / window.innerWidth) * 2 - 1;
+            mouse.y = -(e.clientY / window.innerHeight) * 2 + 1;
+            raycaster.setFromCamera(mouse, camera);
+            const intersects = raycaster.intersectObject(skinMesh);
+            if (intersects.length > 0) {
+                // 点击瞬间，以此为高度基准，防止跳跃，但保留稍微抬起的效果
+                targetHeight = Math.max(diceBody.position.y, 2.0); 
+                const point = getRayPoint(e.clientX, e.clientY);
+                if(point) grabDice(point);
+            }
+        });
+
+        window.addEventListener('mousemove', (e) => {
+            if (isHolding) {
+                const point = getRayPoint(e.clientX, e.clientY);
+                if (point) {
+                    mouseBody.position.x = point.x;
+                    mouseBody.position.z = point.z;
+                    mouseBody.position.y = targetHeight; // 强制同步高度
+                    diceBody.wakeUp();
+                }
+            } else {
+                // Hover Cursor
+                mouse.x = (e.clientX / window.innerWidth) * 2 - 1;
+                mouse.y = -(e.clientY / window.innerHeight) * 2 + 1;
+                raycaster.setFromCamera(mouse, camera);
+                const intersects = raycaster.intersectObject(skinMesh);
+                document.body.style.cursor = intersects.length > 0 ? 'grab' : 'default';
+            }
+        });
+
+        window.addEventListener('mouseup', () => {
+            if (isHolding) {
+                isHolding = false;
+                document.body.style.cursor = 'default';
+                world.removeConstraint(constraint);
+                constraint = null;
+            }
+        });
+
+        // --- 触控事件 (Touch) ---
+        window.addEventListener('touchstart', (e) => {
+            if(e.target.closest('#reset-btn')) return;
+            e.preventDefault();
+            const touch = e.touches[0];
+            mouse.x = (touch.clientX / window.innerWidth) * 2 - 1;
+            mouse.y = -(touch.clientY / window.innerHeight) * 2 + 1;
+            raycaster.setFromCamera(mouse, camera);
+            if (raycaster.intersectObject(skinMesh).length > 0) {
+                targetHeight = 5; // 触控默认抬高
+                const point = getRayPoint(touch.clientX, touch.clientY);
+                if(point) grabDice(point);
+            }
+        }, { passive: false });
+
+        window.addEventListener('touchmove', (e) => {
+            e.preventDefault();
+            if (isHolding) {
+                const touch = e.touches[0];
+                const point = getRayPoint(touch.clientX, touch.clientY);
+                if (point) {
+                    mouseBody.position.x = point.x;
+                    mouseBody.position.z = point.z;
+                    mouseBody.position.y = targetHeight;
+                    diceBody.wakeUp();
+                }
+            }
+        }, { passive: false });
+
+        window.addEventListener('touchend', () => {
+            if (isHolding) {
+                isHolding = false;
+                world.removeConstraint(constraint);
+                constraint = null;
+            }
+        });
+
+        // ==========================================
+        // 6. 渲染循环
+        // ==========================================
+        const clock = new THREE.Clock();
+        function animate() {
+            requestAnimationFrame(animate);
+            const dt = Math.min(clock.getDelta(), 0.1);
+            world.step(1/60, dt, 3);
+            diceMesh.position.copy(diceBody.position);
+            diceMesh.quaternion.copy(diceBody.quaternion);
+            renderer.render(scene, camera);
+        }
+        animate();
+
+        // 窗口调整：重新计算墙壁
+        window.addEventListener('resize', () => {
+            camera.aspect = window.innerWidth / window.innerHeight;
+            camera.updateProjectionMatrix();
+            renderer.setSize(window.innerWidth, window.innerHeight);
+            updateWalls(); // 关键：窗口变化时更新物理边界
+        });
+    </script>
+</body>
+</html>
